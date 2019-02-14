@@ -32,7 +32,7 @@ func main() {
 func moveRegistrationsToProcessing(client *redis.Client) {
 	_, err := client.BRPopLPush("load-lock:registration-queue", "load-lock:registration-queue:processing", time.Second).Result()
 
-	if err != redis.Nil {
+	if err != nil && err != redis.Nil {
 		fmt.Printf("Error pushing registration to processing queue [%s]\n", err.Error())
 	}
 }
