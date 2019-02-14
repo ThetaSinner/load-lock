@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
-	"github.com/go-redis/redis"
 	"os"
+	"time"
+
+	"github.com/go-redis/redis"
 )
 
 func main() {
@@ -19,5 +21,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println("Done. Agent shutting down.")
+	fmt.Println("Agent starting, press Ctrl+C to stop!")
+
+	for {
+		moveRegistrationsToProcessing(client)
+		time.Sleep(100)
+	}
+}
+
+func moveRegistrationsToProcessing(client *redis.Client) {
+	_, err := client.BRPopLPush("load-lock:registration-queue", "load-lock:registration-queue:processing", time.Second).Result()
+
+	if err != redis.Nil {
+		fmt.Printf("Error pushing registration to processing queue [%s]\n", err.Error())
+	}
 }
