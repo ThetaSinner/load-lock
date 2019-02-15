@@ -8,6 +8,12 @@ import (
 	"github.com/go-redis/redis"
 )
 
+// Registration model
+type registration struct {
+	Id    string
+	Group string
+}
+
 func main() {
 	client := redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
@@ -25,6 +31,7 @@ func main() {
 
 	for {
 		moveRegistrationsToProcessing(client)
+
 		time.Sleep(100)
 	}
 }
