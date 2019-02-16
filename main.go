@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/go-redis/redis"
@@ -30,10 +31,24 @@ func main() {
 
 	fmt.Println("Agent starting, press Ctrl+C to stop!")
 
+	const maxActiveCount = 5
+
+	client.SetNX("load-lock:active-count", "0", 0)
+
 	for {
 		moveRegistrationsToProcessing(client)
 
 		processRegistrations(client)
+
+		activeCount, activeCountErr := client.Get("load-lock:active-count").Result()
+		if activeCountErr != nil && activeCountErr != redis.Nil {
+			continue
+		}
+
+		activeCountInt, _ := strconv.ParseInt(activeCount, 10, 32)
+		if activeCountInt < maxActiveCount {
+			selectJobAndUnlock(client)
+		}
 
 		time.Sleep(100)
 	}
@@ -95,4 +110,8 @@ func processRegistrations(client *redis.Client) {
 	}
 
 	client.LRem("load-lock:registration-queue:processing", 1, msg).Result()
+}
+
+func selectJobAndUnlock(client *redis.Client) {
+	// TODO find a job to unlock
 }
