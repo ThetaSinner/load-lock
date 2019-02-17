@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -36,21 +37,30 @@ func main() {
 	client.SetNX("load-lock:active-count", "0", 0)
 
 	for {
+		time.Sleep(3000)
+
+		fmt.Println("move to processing")
 		moveRegistrationsToProcessing(client)
 
+		fmt.Println("process registrations")
 		processRegistrations(client)
 
+		fmt.Println("check active")
 		activeCount, activeCountErr := client.Get("load-lock:active-count").Result()
 		if activeCountErr != nil && activeCountErr != redis.Nil {
+			fmt.Printf("Error checking number of active jobs [%s]", activeCountErr)
 			continue
 		}
 
 		activeCountInt, _ := strconv.ParseInt(activeCount, 10, 32)
 		if activeCountInt < maxActiveCount {
-			selectJobAndUnlock(client)
-		}
+			client.Incr("load-lock:active-count")
 
-		time.Sleep(100)
+			fmt.Println("active good! lets do something")
+			selectJobAndUnlock(client)
+		} else {
+			fmt.Printf("There are already [%d] jobs in progress. Will not start another one", activeCountInt)
+		}
 	}
 }
 
@@ -60,6 +70,8 @@ func moveRegistrationsToProcessing(client *redis.Client) {
 	if err != nil && err != redis.Nil {
 		fmt.Printf("Error pushing registration to processing queue [%s]\n", err.Error())
 	}
+
+	fmt.Println("finished moving to processing!")
 }
 
 func processRegistrations(client *redis.Client) {
@@ -70,8 +82,19 @@ func processRegistrations(client *redis.Client) {
 		return
 	}
 
+	if msg == "" {
+		fmt.Println("No messages")
+		return
+	}
+
+	fmt.Printf("Routing msg [%s]\n", msg)
+
 	reg := registration{}
-	json.Unmarshal([]byte(msg), reg)
+	unmarshalErr := json.Unmarshal([]byte(msg), &reg)
+	if unmarshalErr != nil {
+		fmt.Printf("Failed to unmarshal lovely message [%s]", unmarshalErr)
+		return
+	}
 
 	// Lock on group name so that duplicates aren't added to load-lock:groups-queue.
 	numAdded, groupsSetErr := client.SAdd("load-lock:groups-set", reg.Group).Result()
@@ -79,6 +102,8 @@ func processRegistrations(client *redis.Client) {
 		fmt.Printf("Failed to add to groups set [%s]\n", groupsSetErr.Error())
 		return
 	}
+
+	fmt.Printf("Routing sub [%v]\n", reg)
 
 	// The name of the queue to route to.
 	var groupQueueName = fmt.Sprintf("load-lock:group-queue:%s", reg.Group)
@@ -110,8 +135,62 @@ func processRegistrations(client *redis.Client) {
 	}
 
 	client.LRem("load-lock:registration-queue:processing", 1, msg).Result()
+
+	fmt.Println("finished routing!")
 }
 
 func selectJobAndUnlock(client *redis.Client) {
-	// TODO find a job to unlock
+	var selectedGroupQueue string
+
+	stopAfter, _ := client.LLen("load-lock:groups-queue").Result()
+	stopCounter := int64(0)
+
+	fmt.Printf("There are [%d] groups in the groups-queue\n", stopAfter)
+
+	for {
+		if stopCounter >= stopAfter {
+			fmt.Println("Failed to find anything useful. Dying sadly")
+			return
+		}
+
+		nextGroupQueue, nextGroupQueueErr := client.BRPopLPush("load-lock:groups-queue", "load-lock:groups-queue", time.Second).Result()
+		if nextGroupQueueErr != nil && nextGroupQueueErr != redis.Nil {
+			return
+		}
+
+		addToActiveCount, addToActiveCountErr := client.SAdd("load-lock:active-groups-set", nextGroupQueue).Result()
+		if addToActiveCountErr != nil && addToActiveCountErr != redis.Nil {
+			return
+		}
+
+		if addToActiveCount == 1 {
+			selectedGroupQueue = nextGroupQueue
+			break
+		}
+
+		stopCounter++
+	}
+
+	if selectedGroupQueue == "" {
+		fmt.Println("There were no candidates for selected group")
+		return
+	}
+
+	selectedGroupProcessingQueue := fmt.Sprintf("%s:processing", selectedGroupQueue)
+	msg, err := client.BRPopLPush(selectedGroupQueue, selectedGroupProcessingQueue, time.Second).Result()
+	if err != nil {
+		log.Printf("Failed to move group [%s] between queues. Error was [%s]\n", selectedGroupQueue, err)
+		return
+	}
+
+	fmt.Printf("selectedGroupProcessingQueue: %s\n", selectedGroupProcessingQueue)
+
+	reg := registration{}
+	json.Unmarshal([]byte(msg), reg)
+
+	client.Publish("load-lock:start:%s", reg.Id)
+
+	client.LRem(selectedGroupProcessingQueue, 1, 0)
+
+	fmt.Println("finished unlocking job!")
 }
