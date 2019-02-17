@@ -54,7 +54,8 @@ func main() {
 
 		activeCountInt, _ := strconv.ParseInt(activeCount, 10, 32)
 		if activeCountInt < maxActiveCount {
-			client.Incr("load-lock:active-count")
+			// TODO decr on err from selectandunlock
+			// client.Incr("load-lock:active-count")
 
 			fmt.Println("active good! lets do something")
 			selectJobAndUnlock(client)
@@ -186,11 +187,15 @@ func selectJobAndUnlock(client *redis.Client) {
 	fmt.Printf("selectedGroupProcessingQueue: %s\n", selectedGroupProcessingQueue)
 
 	reg := registration{}
-	json.Unmarshal([]byte(msg), reg)
+	json.Unmarshal([]byte(msg), &reg)
 
-	client.Publish("load-lock:start:%s", reg.Id)
+	subName := fmt.Sprintf("load-lock:start:%s", reg.Id)
 
-	client.LRem(selectedGroupProcessingQueue, 1, 0)
+	fmt.Printf("Publishing message to subname [%s]\n", subName)
+
+	client.Publish(subName, "empty-message").Result()
+
+	client.LRem(selectedGroupProcessingQueue, 1, msg)
 
 	fmt.Println("finished unlocking job!")
 }
