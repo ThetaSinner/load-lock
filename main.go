@@ -13,7 +13,7 @@ import (
 
 // Registration model
 type registration struct {
-	Id    string
+	ID    string
 	Group string
 }
 
@@ -189,7 +189,7 @@ func selectJobAndUnlock(client *redis.Client) {
 	reg := registration{}
 	json.Unmarshal([]byte(msg), &reg)
 
-	subName := fmt.Sprintf("load-lock:start:%s", reg.Id)
+	subName := fmt.Sprintf("load-lock:start:%s", reg.ID)
 
 	fmt.Printf("Publishing message to subname [%s]\n", subName)
 
