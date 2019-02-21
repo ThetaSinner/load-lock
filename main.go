@@ -14,6 +14,17 @@ import (
 
 const redisKeyActiveCount = "load-lock:active-count"
 
+const redisKeyRegistrationQueue = "load-lock:registration-queue"
+const redisKeyRegistrationProcessingQueue = "load-lock:registration-queue:processing"
+
+const redisKeyGroupsSet = "load-lock:groups-set"
+const redisKeyGroupsQueue = "load-lock:groups-queue"
+
+const redisKeyReleaseQueue = "load-lock:release-queue"
+const redisKeyReleaseProcessingQueue = "load-lock:release-queue:processing"
+
+const maxActiveCount = 5
+
 // Registration model
 type registration struct {
 	ID    string
@@ -44,17 +55,13 @@ func main() {
 
 	fmt.Println("Agent starting, press Ctrl+C to stop!")
 
-	const maxActiveCount = 5
-
 	client.SetNX(redisKeyActiveCount, "0", 0)
 
 	for {
 		time.Sleep(3000)
 
-		fmt.Println("move to processing")
 		moveRegistrationsToProcessing(client)
 
-		fmt.Println("process registrations")
 		processRegistrations(client)
 
 		processReleases(client)
@@ -68,8 +75,6 @@ func main() {
 		activeCountInt, _ := strconv.ParseInt(activeCount, 10, 32)
 		if activeCountInt < maxActiveCount {
 			client.Incr(redisKeyActiveCount)
-
-			fmt.Println("active good! lets do something")
 			selectJobAndUnlock(client)
 		} else {
 			fmt.Printf("There are already [%d] jobs in progress. Will not start another one", activeCountInt)
@@ -78,17 +83,15 @@ func main() {
 }
 
 func moveRegistrationsToProcessing(client *redis.Client) {
-	_, err := client.BRPopLPush("load-lock:registration-queue", "load-lock:registration-queue:processing", time.Second).Result()
+	_, err := client.BRPopLPush(redisKeyRegistrationQueue, redisKeyRegistrationProcessingQueue, time.Second).Result()
 
 	if err != nil && err != redis.Nil {
 		fmt.Printf("Error pushing registration to processing queue [%s]\n", err.Error())
 	}
-
-	fmt.Println("finished moving to processing!")
 }
 
 func processRegistrations(client *redis.Client) {
-	msg, err := client.BRPopLPush("load-lock:registration-queue:processing", "load-lock:registration-queue:processing", time.Second).Result()
+	msg, err := client.BRPopLPush(redisKeyRegistrationProcessingQueue, redisKeyRegistrationProcessingQueue, time.Second).Result()
 
 	if err != nil && err != redis.Nil {
 		fmt.Printf("Error getting value from registraiont processing queue [%s]\n", err.Error())
@@ -96,27 +99,22 @@ func processRegistrations(client *redis.Client) {
 	}
 
 	if msg == "" {
-		fmt.Println("No messages")
 		return
 	}
-
-	fmt.Printf("Routing msg [%s]\n", msg)
 
 	reg := registration{}
 	unmarshalErr := json.Unmarshal([]byte(msg), &reg)
 	if unmarshalErr != nil {
-		fmt.Printf("Failed to unmarshal lovely message [%s]", unmarshalErr)
+		fmt.Printf("Failed to unmarshal registration message [%s]. [%s]", msg, unmarshalErr)
 		return
 	}
 
 	// Lock on group name so that duplicates aren't added to load-lock:groups-queue.
-	numAdded, groupsSetErr := client.SAdd("load-lock:groups-set", reg.Group).Result()
+	numAdded, groupsSetErr := client.SAdd(redisKeyGroupsSet, reg.Group).Result()
 	if groupsSetErr != nil && groupsSetErr != redis.Nil {
 		fmt.Printf("Failed to add to groups set [%s]\n", groupsSetErr.Error())
 		return
 	}
-
-	fmt.Printf("Routing sub [%v]\n", reg)
 
 	// The name of the queue to route to.
 	var groupQueueName = fmt.Sprintf("load-lock:group-queue:%s", reg.Group)
@@ -127,7 +125,7 @@ func processRegistrations(client *redis.Client) {
 
 		// Must ensure group is not locked!
 		if numAdded == 1 {
-			_, groupSetRemErr := client.SRem("load-lock:groups-set", groupQueueName).Result()
+			_, groupSetRemErr := client.SRem(redisKeyGroupsSet, groupQueueName).Result()
 
 			if groupSetRemErr != nil && groupSetRemErr != redis.Nil {
 				fmt.Printf("Failed to clean up groups set! Registrations for group [%s] will no longer be processed. [%s]\n", reg.Group, groupSetRemErr.Error())
@@ -139,7 +137,7 @@ func processRegistrations(client *redis.Client) {
 
 	// List this group so that all routes can be processed.
 	if numAdded == 1 {
-		_, groupsQueueErr := client.LPush("load-lock:groups-queue", groupQueueName).Result()
+		_, groupsQueueErr := client.LPush(redisKeyGroupsQueue, groupQueueName).Result()
 
 		if groupsQueueErr != nil && groupsQueueErr != redis.Nil {
 			fmt.Printf("Failed to add to groups queue [%s]\n", groupsQueueErr.Error())
@@ -155,7 +153,7 @@ func processRegistrations(client *redis.Client) {
 func selectJobAndUnlock(client *redis.Client) {
 	var selectedGroupQueue string
 
-	stopAfter, _ := client.LLen("load-lock:groups-queue").Result()
+	stopAfter, _ := client.LLen(redisKeyGroupsQueue).Result()
 	stopCounter := int64(0)
 
 	fmt.Printf("There are [%d] groups in the groups-queue\n", stopAfter)
@@ -166,7 +164,7 @@ func selectJobAndUnlock(client *redis.Client) {
 			return
 		}
 
-		nextGroupQueue, nextGroupQueueErr := client.BRPopLPush("load-lock:groups-queue", "load-lock:groups-queue", time.Second).Result()
+		nextGroupQueue, nextGroupQueueErr := client.BRPopLPush(redisKeyGroupsQueue, redisKeyGroupsQueue, time.Second).Result()
 		if nextGroupQueueErr != nil && nextGroupQueueErr != redis.Nil {
 			return
 		}
@@ -196,31 +194,23 @@ func selectJobAndUnlock(client *redis.Client) {
 		return
 	}
 
-	fmt.Printf("selectedGroupProcessingQueue: %s\n", selectedGroupProcessingQueue)
-
 	reg := registration{}
 	json.Unmarshal([]byte(msg), &reg)
 
 	subName := fmt.Sprintf("load-lock:start:%s", reg.ID)
-
-	fmt.Printf("Publishing message to subname [%s]\n", subName)
-
 	client.Publish(subName, "empty-message").Result()
 
 	client.LRem(selectedGroupProcessingQueue, 1, msg)
-
-	fmt.Println("finished unlocking job!")
 }
 
 func processReleases(client *redis.Client) {
-	msg, err := client.BRPopLPush("load-lock:release-queue", "load-lock:release-queue:processing", time.Second).Result()
+	msg, err := client.BRPopLPush(redisKeyReleaseQueue, redisKeyReleaseProcessingQueue, time.Second).Result()
 
 	if err != nil && err != redis.Nil {
 		return
 	}
 
 	if msg == "" {
-		fmt.Println("Nothing on the release queue")
 		return
 	}
 
@@ -239,7 +229,7 @@ func processReleases(client *redis.Client) {
 		client.Decr("load-lock:active-count")
 	}
 
-	client.LRem("load-lock:release-queue:processing", 1, msg)
+	client.LRem(redisKeyReleaseProcessingQueue, 1, msg)
 }
 
 func cleanAgentData(client *redis.Client) {
