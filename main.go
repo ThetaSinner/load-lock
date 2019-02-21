@@ -45,6 +45,8 @@ func main() {
 		fmt.Println("process registrations")
 		processRegistrations(client)
 
+		processReleases(client)
+
 		fmt.Println("check active")
 		activeCount, activeCountErr := client.Get("load-lock:active-count").Result()
 		if activeCountErr != nil && activeCountErr != redis.Nil {
@@ -54,8 +56,7 @@ func main() {
 
 		activeCountInt, _ := strconv.ParseInt(activeCount, 10, 32)
 		if activeCountInt < maxActiveCount {
-			// TODO decr on err from selectandunlock
-			// client.Incr("load-lock:active-count")
+			client.Incr("load-lock:active-count")
 
 			fmt.Println("active good! lets do something")
 			selectJobAndUnlock(client)
@@ -198,4 +199,34 @@ func selectJobAndUnlock(client *redis.Client) {
 	client.LRem(selectedGroupProcessingQueue, 1, msg)
 
 	fmt.Println("finished unlocking job!")
+}
+
+func processReleases(client *redis.Client) {
+	msg, err := client.BRPopLPush("load-lock:release-queue", "load-lock:release-queue:processing", time.Second).Result()
+
+	if err != nil && err != redis.Nil {
+		return
+	}
+
+	if msg == "" {
+		fmt.Println("Nothing on the release queue")
+		return
+	}
+
+	reg := registration{}
+	json.Unmarshal([]byte(msg), &reg)
+
+	groupQueueName := fmt.Sprintf("load-lock:group-queue:%s", reg.Group)
+
+	activeRemoved, activeRemovedErr := client.SRem("load-lock:active-groups-set", groupQueueName).Result()
+
+	if activeRemovedErr != nil && activeRemovedErr != redis.Nil {
+		return
+	}
+
+	if activeRemoved == 1 {
+		client.Decr("load-lock:active-count")
+	}
+
+	client.LRem("load-lock:release-queue:processing", 1, msg)
 }
