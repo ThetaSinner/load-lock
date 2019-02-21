@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"github.com/go-redis/redis"
 )
 
+const redisKeyActiveCount = "load-lock:active-count"
+
 // Registration model
 type registration struct {
 	ID    string
@@ -18,6 +21,9 @@ type registration struct {
 }
 
 func main() {
+	isClean := flag.Bool("clean", false, "Performs a clean of redis then shuts down")
+	flag.Parse()
+
 	client := redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
 		Password: "", // no password set
@@ -30,11 +36,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *isClean {
+		cleanAgentData(client)
+		fmt.Println("Finished cleaning. Exiting")
+		return
+	}
+
 	fmt.Println("Agent starting, press Ctrl+C to stop!")
 
 	const maxActiveCount = 5
 
-	client.SetNX("load-lock:active-count", "0", 0)
+	client.SetNX(redisKeyActiveCount, "0", 0)
 
 	for {
 		time.Sleep(3000)
@@ -47,8 +59,7 @@ func main() {
 
 		processReleases(client)
 
-		fmt.Println("check active")
-		activeCount, activeCountErr := client.Get("load-lock:active-count").Result()
+		activeCount, activeCountErr := client.Get(redisKeyActiveCount).Result()
 		if activeCountErr != nil && activeCountErr != redis.Nil {
 			fmt.Printf("Error checking number of active jobs [%s]", activeCountErr)
 			continue
@@ -56,7 +67,7 @@ func main() {
 
 		activeCountInt, _ := strconv.ParseInt(activeCount, 10, 32)
 		if activeCountInt < maxActiveCount {
-			client.Incr("load-lock:active-count")
+			client.Incr(redisKeyActiveCount)
 
 			fmt.Println("active good! lets do something")
 			selectJobAndUnlock(client)
@@ -229,4 +240,8 @@ func processReleases(client *redis.Client) {
 	}
 
 	client.LRem("load-lock:release-queue:processing", 1, msg)
+}
+
+func cleanAgentData(client *redis.Client) {
+	client.Del(redisKeyActiveCount)
 }
