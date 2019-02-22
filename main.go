@@ -35,11 +35,7 @@ func main() {
 	isClean := flag.Bool("clean", false, "Performs a clean of redis then shuts down")
 	flag.Parse()
 
-	client := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
-	})
+	client := getRedisClient()
 
 	_, err := client.Ping().Result()
 	if err != nil {
@@ -50,9 +46,20 @@ func main() {
 	if *isClean {
 		cleanAgentData(client)
 		fmt.Println("Finished cleaning. Exiting")
-		return
+	} else {
+		runAgent(client)
 	}
+}
 
+func getRedisClient() *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "", // no password set
+		DB:       0,  // use default DB
+	})
+}
+
+func runAgent(client *redis.Client) {
 	fmt.Println("Agent starting, press Ctrl+C to stop!")
 
 	client.SetNX(redisKeyActiveCount, "0", 0)
@@ -233,5 +240,5 @@ func processReleases(client *redis.Client) {
 }
 
 func cleanAgentData(client *redis.Client) {
-	client.Del(redisKeyActiveCount)
+	client.FlushDB()
 }
