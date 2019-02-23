@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"time"
@@ -82,9 +81,13 @@ func runAgent(client *redis.Client) {
 		activeCountInt, _ := strconv.ParseInt(activeCount, 10, 32)
 		if activeCountInt < maxActiveCount {
 			client.Incr(redisKeyActiveCount)
-			selectJobAndUnlock(client)
+			unlockSucess, _ := selectJobAndUnlock(client)
+
+			if !unlockSucess {
+				client.Decr(redisKeyActiveCount)
+			}
 		} else {
-			fmt.Printf("There are already [%d] jobs in progress. Will not start another one", activeCountInt)
+			fmt.Printf("There are already [%d] jobs in progress. Will not start another one\n", activeCountInt)
 		}
 	}
 }
@@ -152,33 +155,31 @@ func processRegistrations(client *redis.Client) {
 		}
 	}
 
-	client.LRem("load-lock:registration-queue:processing", 1, msg).Result()
+	client.LRem(redisKeyRegistrationProcessingQueue, 1, msg).Result()
 
 	fmt.Println("finished routing!")
 }
 
-func selectJobAndUnlock(client *redis.Client) {
+func selectJobAndUnlock(client *redis.Client) (success bool, err error) {
 	var selectedGroupQueue string
 
 	stopAfter, _ := client.LLen(redisKeyGroupsQueue).Result()
 	stopCounter := int64(0)
 
-	fmt.Printf("There are [%d] groups in the groups-queue\n", stopAfter)
-
 	for {
 		if stopCounter >= stopAfter {
-			fmt.Println("Failed to find anything useful. Dying sadly")
-			return
+			// No groups that we can start processing something from. Stop.
+			return false, nil
 		}
 
 		nextGroupQueue, nextGroupQueueErr := client.BRPopLPush(redisKeyGroupsQueue, redisKeyGroupsQueue, time.Second).Result()
 		if nextGroupQueueErr != nil && nextGroupQueueErr != redis.Nil {
-			return
+			return false, nextGroupQueueErr
 		}
 
 		addToActiveCount, addToActiveCountErr := client.SAdd("load-lock:active-groups-set", nextGroupQueue).Result()
 		if addToActiveCountErr != nil && addToActiveCountErr != redis.Nil {
-			return
+			return false, addToActiveCountErr
 		}
 
 		if addToActiveCount == 1 {
@@ -190,15 +191,13 @@ func selectJobAndUnlock(client *redis.Client) {
 	}
 
 	if selectedGroupQueue == "" {
-		fmt.Println("There were no candidates for selected group")
-		return
+		return false, nil
 	}
 
 	selectedGroupProcessingQueue := fmt.Sprintf("%s:processing", selectedGroupQueue)
 	msg, err := client.BRPopLPush(selectedGroupQueue, selectedGroupProcessingQueue, time.Second).Result()
 	if err != nil {
-		log.Printf("Failed to move group [%s] between queues. Error was [%s]\n", selectedGroupQueue, err)
-		return
+		return false, err
 	}
 
 	reg := registration{}
@@ -208,6 +207,8 @@ func selectJobAndUnlock(client *redis.Client) {
 	client.Publish(subName, "empty-message").Result()
 
 	client.LRem(selectedGroupProcessingQueue, 1, msg)
+
+	return true, nil
 }
 
 func processReleases(client *redis.Client) {
